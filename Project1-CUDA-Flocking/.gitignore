@@ -7,7 +7,7 @@ cis5650_boids_generated_kernel*
 *.xcodeproj
 build
 out
-.cache/
+.cache/**
 
 .vs/
 .vscode/
