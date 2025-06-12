@@ -446,10 +446,14 @@ __global__ void kernUpdateVelNeighborSearchScattered(
   int gridIndex = gridIndex3Dto1D(gridX, gridY, gridZ, gridResolution);
   // Identify which cells may contain neighbors
   // This is a 2x2x2 grid around the particle, but it may not always be 8 cells
-  int neighborCount = 0;
+
   glm::vec3 centerOfMass(0.0f, 0.0f, 0.0f);
+  int count_mass = 0;
+  
   glm::vec3 separation(0.0f, 0.0f, 0.0f);
+  int count_separation = 0;
   glm::vec3 velocityMatch(0.0f, 0.0f, 0.0f);
+  int count_velocity = 0;
   for (int x = -1; x <= 1; x++) {
     for (int y = -1; y <= 1; y++) {
       for (int z = -1; z <= 1; z++) {
@@ -479,27 +483,44 @@ __global__ void kernUpdateVelNeighborSearchScattered(
             // Rule 1: boids fly towards their local perceived center of mass,
             // which excludes themselves
             centerOfMass += otherPos;
-            neighborCount++;
+            count_mass++;
+          }
+          if (boidIndex != index &&
+              glm::length(otherPos - thisPos) < rule2Distance) {
             // Rule 2: boids try to stay a distance d away from each other
             separation -= (otherPos - thisPos);
+            count_separation++;
+          }
+          if (boidIndex != index &&
+              glm::length(otherPos - thisPos) < rule3Distance) {
             // Rule 3: boids try to match the speed of surrounding boids
             velocityMatch += vel1[boidIndex];
+            count_velocity++;
           }
         }
       }
     }
   }
   // Compute the velocity change based on the boids rules
-  if (neighborCount > 0) {
-    centerOfMass /= (float)neighborCount;
+  if (count_mass > 0) {
+    centerOfMass /= (float)count_mass;
     velocityChange += (centerOfMass - thisPos) * rule1Scale;
-    separation *= rule2Scale;
+  }
+  if (count_separation > 0) {
     velocityChange += separation * rule2Scale;
-    velocityMatch /= (float)neighborCount;
+  }
+  if (count_velocity > 0) {
+    velocityMatch /= (float)count_velocity;
     velocityChange += (velocityMatch - thisVel) * rule3Scale;
   }
-
-  vel2[index] = thisVel + velocityChange;
+  // Clamp the speed change before putting the new speed in vel2
+  glm::vec3 newVel = thisVel + velocityChange;
+  float speed = glm::length(newVel);
+  if (speed > maxSpeed) {
+    newVel = (newVel / speed) * maxSpeed;
+  }
+  // Record the new velocity into vel2
+  vel2[index] = newVel;
 
 }
 

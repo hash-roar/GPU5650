@@ -7,6 +7,10 @@ cis5650_boids_generated_kernel*
 *.xcodeproj
 build
 out
+.cache/
+
+.vs/
+.vscode/
 # Created by https://www.gitignore.io/api/linux,osx,sublimetext,windows,jetbrains,vim,emacs,cmake,c++,cuda,visualstudio,webstorm,eclipse,xcode
 
 ### Linux ###
