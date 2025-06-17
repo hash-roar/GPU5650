@@ -2,6 +2,7 @@
 #define _TASKSYS_H
 
 #include "itasksys.h"
+#include "thread_pool.h"
 #include <condition_variable>
 #include <cstdio>
 #include <functional>
@@ -59,16 +60,16 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
                                 const std::vector<TaskID>& deps);
         void sync();
     public:
-        class  ThreadPool {
+        class  ThreadPoolInner {
         public:
-             ThreadPool ()=default;
-            ~ ThreadPool () {
+             ThreadPoolInner ()=default;
+            ~ ThreadPoolInner () {
                 stopAll();
             }
-            ThreadPool(const ThreadPool&) = delete;
-            ThreadPool& operator=(const ThreadPool&) = delete;
-            ThreadPool(ThreadPool&&) = delete;
-            ThreadPool& operator=(ThreadPool&&) = delete;
+            ThreadPoolInner(const ThreadPoolInner&) = delete;
+            ThreadPoolInner& operator=(const ThreadPoolInner&) = delete;
+            ThreadPoolInner(ThreadPoolInner&&) = delete;
+            ThreadPoolInner& operator=(ThreadPoolInner&&) = delete;
 
             void enqueue(std::function<void()> task){
                 std::unique_lock<std::mutex> lock(queue_mutex);
@@ -88,7 +89,7 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
             void start(int num_threads) {
                 stop = false;
                 for (int i = 0; i < num_threads; ++i) {
-                    threads.emplace_back(&ThreadPool::worker, this);
+                    threads.emplace_back(&ThreadPoolInner::worker, this);
                 }
             }
             void stopAll() {
@@ -135,7 +136,7 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
             }
         };
         private:
-            ThreadPool thread_pool{};
+            ThreadPool thread_pool;
 };
 
 /*
@@ -153,6 +154,8 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        ThreadPool thread_pool;
 };
 
 #endif
