@@ -1,0 +1,10 @@
+CompileFlags:
+  Remove: 
+    - "-forward-unknown-to-host-compiler"
+    - "-arch=native"
+    - "-rdc=true"
+    - "-G"  # 添加这行
+    - "--expt-extended-lambda"
+    - "--expt-relaxed-constexpr"
+  Add:
+    - "-march=native"  # 替换 -arch=native
