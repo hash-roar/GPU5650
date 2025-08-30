@@ -17,8 +17,16 @@
 class GuiDataContainer
 {
 public:
-    GuiDataContainer() : TracedDepth(0) {}
-    int TracedDepth;
+    GuiDataContainer() : TracedDepth(0), MaxTracedDepth(0), ActivePaths(0), TotalPaths(0), 
+                        CurrentIteration(0), StreamCompactionEnabled(false), MaterialSortingEnabled(false) {}
+    
+    int TracedDepth;          // Current depth being traced
+    int MaxTracedDepth;       // Maximum depth reached in current iteration
+    int ActivePaths;          // Number of active paths in current depth
+    int TotalPaths;           // Total number of paths (pixels)
+    int CurrentIteration;     // Current iteration number
+    bool StreamCompactionEnabled;
+    bool MaterialSortingEnabled;
 };
 
 namespace utilityCore

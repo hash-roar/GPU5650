@@ -234,8 +234,29 @@ void RenderImGui()
     //    counter++;
     //ImGui::SameLine();
     //ImGui::Text("counter = %d", counter);
-    ImGui::Text("Traced Depth %d", imguiData->TracedDepth);
+    
+    // Performance and Debug Information
+    ImGui::Separator();
+    ImGui::Text("Performance Metrics");
     ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
+    
+    ImGui::Separator();
+    ImGui::Text("Path Tracing Debug Info");
+    ImGui::Text("Current Iteration: %d", imguiData->CurrentIteration);
+    ImGui::Text("Current Traced Depth: %d", imguiData->TracedDepth);
+    ImGui::Text("Max Traced Depth (this iter): %d", imguiData->MaxTracedDepth);
+    ImGui::Text("Active Paths: %d", imguiData->ActivePaths);
+    ImGui::Text("Total Paths: %d", imguiData->TotalPaths);
+    
+    if (imguiData->TotalPaths > 0) {
+        float activePercentage = (float)imguiData->ActivePaths / (float)imguiData->TotalPaths * 100.0f;
+        ImGui::Text("Active Path Ratio: %.2f%%", activePercentage);
+    }
+    
+    ImGui::Separator();
+    ImGui::Text("Optimization Settings");
+    ImGui::Text("Stream Compaction: %s", imguiData->StreamCompactionEnabled ? "ON" : "OFF");
+    ImGui::Text("Material Sorting: %s", imguiData->MaterialSortingEnabled ? "ON" : "OFF");
     ImGui::End();
 
 

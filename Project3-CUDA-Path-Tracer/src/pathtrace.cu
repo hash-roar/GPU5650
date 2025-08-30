@@ -12,6 +12,10 @@
 #include <thrust/sequence.h>
 #include <thrust/gather.h>
 #include <thrust/count.h>
+#include <thrust/transform.h>
+#include <thrust/device_ptr.h>
+#include <thrust/iterator/zip_iterator.h>
+#include <thrust/tuple.h>
 
 #include "sceneStructs.h"
 #include "scene.h"
@@ -99,13 +103,10 @@ static Geom* dev_geoms = nullptr;
 static Material* dev_materials = nullptr;
 static PathSegment* dev_paths = nullptr;
 static ShadeableIntersection* dev_intersections = nullptr;
-// Additional buffers for material sorting
-static PathSegment* dev_paths_sorted = nullptr;
-static ShadeableIntersection* dev_intersections_sorted = nullptr;
 
 // Performance toggles
 static bool USE_STREAM_COMPACTION = true;
-static bool SORT_BY_MATERIAL = true;
+static bool SORT_BY_MATERIAL = false;
 
 void InitDataContainer(GuiDataContainer* imGuiData)
 {
@@ -152,12 +153,6 @@ void pathtraceInit(Scene* scene)
     cudaMalloc(&dev_intersections, pixelcount * sizeof(ShadeableIntersection));
     cudaMemset(dev_intersections, 0, pixelcount * sizeof(ShadeableIntersection));
 
-    // Additional buffers for material sorting optimization
-    if (SORT_BY_MATERIAL) {
-        cudaMalloc(&dev_paths_sorted, pixelcount * sizeof(PathSegment));
-        cudaMalloc(&dev_intersections_sorted, pixelcount * sizeof(ShadeableIntersection));
-    }
-
     checkCUDAError("pathtraceInit");
 }
 
@@ -168,12 +163,6 @@ void pathtraceFree()
     cudaFree(dev_geoms);
     cudaFree(dev_materials);
     cudaFree(dev_intersections);
-    
-    // Clean up material sorting buffers
-    if (SORT_BY_MATERIAL) {
-        cudaFree(dev_paths_sorted);
-        cudaFree(dev_intersections_sorted);
-    }
 
     checkCUDAError("pathtraceFree");
 }
@@ -319,51 +308,14 @@ struct InvalidIntersectionPredicate
     }
 };
 
-// Comparator for sorting by material ID
-struct MaterialComparator
-{
-    ShadeableIntersection* intersections;
-    
+// Functor to extract material ID from an intersection object
+struct GetMaterialId {
     __host__ __device__
-    MaterialComparator(ShadeableIntersection* _intersections) : intersections(_intersections) {}
-    
-    __host__ __device__
-    bool operator()(int i, int j)
-    {
-        // First sort by whether intersection exists (valid intersections first)
-        bool valid_i = intersections[i].t > 0.0f;
-        bool valid_j = intersections[j].t > 0.0f;
-        
-        if (valid_i != valid_j) {
-            return valid_i > valid_j; // valid intersections come first
-        }
-        
-        if (valid_i && valid_j) {
-            // Both valid - sort by material ID
-            return intersections[i].materialId < intersections[j].materialId;
-        }
-        
-        // Both invalid - order doesn't matter
-        return false;
+    int operator()(const ShadeableIntersection& inter) const {
+        // For invalid intersections (t <= 0), use a special high value to sort them last
+        return (inter.t > 0.0f) ? inter.materialId : INT_MAX;
     }
 };
-
-// Kernel to gather sorted paths and intersections
-__global__ void gatherSortedData(
-    int num_paths,
-    int* indices,
-    PathSegment* input_paths,
-    ShadeableIntersection* input_intersections,
-    PathSegment* output_paths,
-    ShadeableIntersection* output_intersections)
-{
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx < num_paths) {
-        int original_idx = indices[idx];
-        output_paths[idx] = input_paths[original_idx];
-        output_intersections[idx] = input_intersections[original_idx];
-    }
-}
 
 // BSDF shader with throughput logic and direct image accumulation
 __global__ void shadeBSDF(
@@ -381,7 +333,7 @@ __global__ void shadeBSDF(
         PathSegment& pathSegment = pathSegments[idx];
         
         // Check if path should continue
-        if (pathSegment.remainingBounces <= 0) {
+        if (pathSegment.remainingBounces <= 0 || intersection.t <= 0.0f) {
             pathSegment.remainingBounces = 0;
             return;
         }
@@ -399,10 +351,7 @@ __global__ void shadeBSDF(
                 // Accumulate light contribution directly to image
                 glm::vec3 lightContribution = pathSegment.throughput * material.color * material.emittance;
                 pathSegment.color = lightContribution;
-                
-                // Accumulate to image immediately - no atomic needed since each path has unique pixelIndex
                 image[pathSegment.pixelIndex] += lightContribution;
-                
                 // Terminate path
                 pathSegment.remainingBounces = 0;
             } else {
@@ -458,6 +407,16 @@ void pathtrace(uchar4* pbo, int frame, int iter)
     const int traceDepth = hst_scene->state.traceDepth;
     const Camera& cam = hst_scene->state.camera;
     const int pixelcount = cam.resolution.x * cam.resolution.y;
+
+    // Update GUI data at start of iteration
+    if (guiData != nullptr)
+    {
+        guiData->CurrentIteration = iter;
+        guiData->TotalPaths = pixelcount;
+        guiData->MaxTracedDepth = 0; // Reset for this iteration
+        guiData->StreamCompactionEnabled = USE_STREAM_COMPACTION;
+        guiData->MaterialSortingEnabled = SORT_BY_MATERIAL;
+    }
 
     // 2D block for generating ray from camera
     const dim3 blockSize2d(8, 8);
@@ -529,75 +488,43 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         cudaDeviceSynchronize();
         depth++;
 
-        // First stream compaction: remove paths that didn't hit anything
-        if (USE_STREAM_COMPACTION && num_paths > 0) {
-            // Create indices array for paths that hit something
-            thrust::device_vector<int> indices(num_paths);
-            thrust::sequence(indices.begin(), indices.end());
-            
-            // Remove paths with no intersection
-            auto new_end = thrust::remove_if(
-                thrust::device,
-                indices.begin(),
-                indices.end(),
-                InvalidIntersectionPredicate(dev_intersections)
-            );
-            
-            int valid_paths = new_end - indices.begin();
-            
-            if (valid_paths != num_paths) {
-                // Compact paths and intersections arrays
-                thrust::device_vector<PathSegment> temp_paths(valid_paths);
-                thrust::device_vector<ShadeableIntersection> temp_intersections(valid_paths);
-                
-                // Gather valid paths
-                thrust::gather(thrust::device,
-                              indices.begin(), indices.begin() + valid_paths,
-                              dev_paths, temp_paths.begin());
-                              
-                thrust::gather(thrust::device,
-                              indices.begin(), indices.begin() + valid_paths,
-                              dev_intersections, temp_intersections.begin());
-                
-                // Copy back to original arrays
-                cudaMemcpy(dev_paths, thrust::raw_pointer_cast(temp_paths.data()), 
-                          valid_paths * sizeof(PathSegment), cudaMemcpyDeviceToDevice);
-                cudaMemcpy(dev_intersections, thrust::raw_pointer_cast(temp_intersections.data()), 
-                          valid_paths * sizeof(ShadeableIntersection), cudaMemcpyDeviceToDevice);
-                
-                num_paths = valid_paths;
-                numblocksPathSegmentTracing = (num_paths + blockSize1d - 1) / blockSize1d;
-            }
-        }
+
 
         // Material sorting for better coherence (optional optimization)
         PathSegment* paths_to_shade = dev_paths;
         ShadeableIntersection* intersections_to_shade = dev_intersections;
         
         if (SORT_BY_MATERIAL && num_paths > 0) {
-            // Create array of indices
-            thrust::device_vector<int> indices(num_paths);
-            thrust::sequence(indices.begin(), indices.end());
+            // 1. 创建一个 device_vector 来存储 Key (Material IDs)
+            thrust::device_vector<int> material_ids(num_paths);
+
+            // 2. 从 dev_intersections 中提取 material_id 到新的 vector 中
+            thrust::transform(thrust::device_pointer_cast(dev_intersections),
+                              thrust::device_pointer_cast(dev_intersections) + num_paths,
+                              material_ids.begin(),
+                              GetMaterialId());
             
-            // Sort indices by material ID
-            thrust::sort(indices.begin(), indices.end(), MaterialComparator(dev_intersections));
-            
-            // Gather sorted data
-            dim3 numBlocksGather = (num_paths + blockSize1d - 1) / blockSize1d;
-            gatherSortedData<<<numBlocksGather, blockSize1d>>>(
-                num_paths,
-                thrust::raw_pointer_cast(indices.data()),
-                dev_paths,
-                dev_intersections,
-                dev_paths_sorted,
-                dev_intersections_sorted
+            // 3. 将两个需要排序的 Value 数组打包成一个 zip_iterator
+            auto values_begin = thrust::make_zip_iterator(
+                thrust::make_tuple(
+                    thrust::device_pointer_cast(dev_paths),
+                    thrust::device_pointer_cast(dev_intersections)
+                )
             );
-            checkCUDAError("gather sorted data");
+
+            // 4. 执行一步到位的 "sort by key"
+            thrust::stable_sort_by_key(
+                material_ids.begin(), // Keys to sort by
+                material_ids.end(),
+                values_begin          // Zipped values to sort
+            );
+
+            checkCUDAError("thrust::stable_sort_by_key");
             cudaDeviceSynchronize();
-            
-            // Use sorted arrays for shading
-            paths_to_shade = dev_paths_sorted;
-            intersections_to_shade = dev_intersections_sorted;
+
+            // 现在 dev_paths 和 dev_intersections 已经按 material_id 排序好了
+            paths_to_shade = dev_paths;
+            intersections_to_shade = dev_intersections;
         }
 
         // Shading Stage - Shade path segments and accumulate light contributions
@@ -611,12 +538,6 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         );
         checkCUDAError("shade bsdf");
         cudaDeviceSynchronize();
-        
-        // Copy sorted data back if we used material sorting
-        if (SORT_BY_MATERIAL && num_paths > 0) {
-            cudaMemcpy(dev_paths, paths_to_shade, num_paths * sizeof(PathSegment), cudaMemcpyDeviceToDevice);
-            checkCUDAError("copy sorted paths back");
-        }
 
         // Second stream compaction: remove terminated paths for next iteration
         if (USE_STREAM_COMPACTION) {
@@ -646,10 +567,16 @@ void pathtrace(uchar4* pbo, int frame, int iter)
         // Check if all paths are terminated or max depth reached
         iterationComplete = (num_paths == 0) || (depth >= traceDepth);
 
-        if (guiData != NULL)
+        // Update GUI data for current depth
+        if (guiData != nullptr)
         {
             guiData->TracedDepth = depth;
+            guiData->ActivePaths = num_paths;
+            if (depth > guiData->MaxTracedDepth) {
+                guiData->MaxTracedDepth = depth;
+            }
         }
+
     }
 
     // All light contributions have been accumulated directly in the shader
