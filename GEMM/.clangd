@@ -1,0 +1,16 @@
+CompileFlags:
+  Remove: 
+    - -gencode
+    - -arch=*
+    - --gpu-architecture=*
+    - --generate-code=*
+    - -ccbin
+    - --compiler-bindir
+    - --expt-relaxed-constexpr
+    - --expt-extended-lambda
+    - -rdc=*
+    - --relocatable-device-code=*
+  Add:
+    - -xcuda
+    - --cuda-gpu-arch=sm_75
+    - --cuda-path=/usr/local/cuda
